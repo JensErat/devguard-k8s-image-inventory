@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - Images are pulled from the CRI `imageID` digest, and the registry proxy is applied to the parsed reference instead of the pod-spec string. Docker Hub shorthand specs (`busybox:1.38.0`, …) are now proxied too, and the scan pulls the digest the pod actually runs instead of re-resolving its tag.
+- Multi-arch images are copied for the platform the daemon runs on (`linux/<GOARCH>`) only, instead of every child of the index. This stops the mirror from syncing platforms kubelet never pulled, avoids 404s while zot syncs a cold platform, and shrinks the `/tmp` footprint per scan. Indexes without a matching platform fall back to a full copy.
 
 ## [v1.0.3] - 2026-11-17
 

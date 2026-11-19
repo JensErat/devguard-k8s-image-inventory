@@ -7,15 +7,18 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"time"
 
 	"github.com/ckotzbauer/libk8soci/pkg/oci"
 	"github.com/l3montree-dev/devguard-k8s-image-inventory/kubernetes"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"oras.land/oras-go/v2"
 	orasOci "oras.land/oras-go/v2/content/oci"
+	"oras.land/oras-go/v2/errdef"
 	"oras.land/oras-go/v2/registry/remote"
 	"oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/retry"
@@ -50,6 +53,13 @@ func (t Trivy) downloadImageToLocalFilesystem(img *oci.RegistryImage) (string, e
 		return "", errors.Wrap(err, "could not create temp directory")
 	}
 
+	cleanUp := true
+	defer func() {
+		if cleanUp {
+			os.RemoveAll(tmpDir)
+		}
+	}()
+
 	store, err := orasOci.New(tmpDir)
 
 	if err != nil {
@@ -78,12 +88,40 @@ func (t Trivy) downloadImageToLocalFilesystem(img *oci.RegistryImage) (string, e
 		}
 	}
 
-	_, err = oras.Copy(ctx, repo, tag, store, tag, oras.DefaultCopyOptions)
-	if err != nil {
+	if err := copyImage(ctx, repo, store, tag); err != nil {
 		return "", errors.Wrap(err, "could not copy image")
 	}
 
+	cleanUp = false
 	return tmpDir, nil
+}
+
+// copyOptions limits the copy to the platform this daemon runs on. The other
+// children of a multi-arch index were never pulled by kubelet, so they are not
+// in the mirror cache: copying them makes zot sync every platform on demand
+// (which can 404 mid-sync) and bloats both the mirror and /tmp.
+func copyOptions() oras.CopyOptions {
+	opts := oras.DefaultCopyOptions
+	opts.WithTargetPlatform(&ocispec.Platform{OS: "linux", Architecture: runtime.GOARCH})
+	return opts
+}
+
+// copyImage copies ref from src to dst, preferring the single platform
+// manifest. Indexes without a manifest for the running platform fall back to
+// copying every platform.
+func copyImage(ctx context.Context, src, dst oras.Target, ref string) error {
+	platform := "linux/" + runtime.GOARCH
+
+	slog.Debug("Copying image", "reference", ref, "platform", platform)
+
+	_, err := oras.Copy(ctx, src, ref, dst, ref, copyOptions())
+	if err != nil && errors.Is(err, errdef.ErrNotFound) {
+		slog.Warn("No manifest for the running platform, copying every platform",
+			"reference", ref, "platform", platform)
+		_, err = oras.Copy(ctx, src, ref, dst, ref, oras.DefaultCopyOptions)
+	}
+
+	return err
 }
 
 // ExecuteTrivy scans the provided image with Trivy and returns its CycloneDX SBOM.
